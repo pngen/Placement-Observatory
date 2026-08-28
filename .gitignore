@@ -1,0 +1,57 @@
+# Build trees
+/build/
+/build-*/
+/bin/
+/out/
+/install/
+/install-*/
+/_dist/
+/*.user
+
+# CMake artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+*.cmake.stamp
+/Testing/
+
+# Compiled artifacts
+*.obj
+*.lib
+*.exp
+*.exe
+*.pdb
+*.ilk
+*.mod
+*.o
+*.a
+*.so
+*.dll
+*.dylib
+check.obj
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sln
+*.vcxproj*
+.cache/
+
+# Logs / temp / scratch
+*.log
+*.tmp
+*.dmp
+*.trace
+*.ptrace
+*.obsdb
+/_scratch/
+
+# Test / benchmark scratch outputs
+tests/scratch/
+bench/scratch/
+examples/scratch/

@@ -1,0 +1,7 @@
+if(NOT PO_BUILD_BENCHMARKS)
+  return()
+endif()
+add_executable(po_bench bench.cpp)
+target_link_libraries(po_bench PRIVATE PlacementObservatory)
+target_include_directories(po_bench PRIVATE ${CMAKE_SOURCE_DIR}/include)
+set_target_properties(po_bench PROPERTIES CXX_STANDARD 20)

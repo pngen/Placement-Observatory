@@ -1,0 +1,18 @@
+if(NOT PO_BUILD_TESTS)
+  return()
+endif()
+
+function(po_add_test name)
+  add_executable(${name} ${ARGN})
+  target_link_libraries(${name} PRIVATE PlacementObservatory)
+  target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  set_target_properties(${name} PROPERTIES CXX_STANDARD 20)
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+po_add_test(core.test core.test.cpp)
+po_add_test(adversarial.test adversarial.test.cpp)
+po_add_test(concurrency.test concurrency.test.cpp)
+po_add_test(randomized.test randomized.test.cpp)
+po_add_test(persistence.test persistence.test.cpp)
+po_add_test(multiprocess.test multiprocess.test.cpp)
