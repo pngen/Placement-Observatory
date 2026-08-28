@@ -3,6 +3,7 @@
 #include "placement_observatory/serialize.hpp"
 #include "placement_observatory/protocol.hpp"
 #include "placement_observatory/core/json.hpp"
+#include "placement_observatory/compute.hpp"
 #include <limits>
 #include <atomic>
 #include <filesystem>
@@ -180,6 +181,91 @@ PO_TEST(conflicting_sources_preserved_and_orphan_cleanup) {
   PO_CHECK(std::filesystem::exists(trace));
   PO_CHECK(!std::filesystem::exists(trace + ".tmp"));
   std::filesystem::remove_all(dir);
+}
+
+
+PO_TEST(duplicate_placement_attempt_rejected) {
+  Observatory obs;
+  auto d1 = po_scenario::memory_decision(PlacementDecisionId(501), WorkloadId(501));
+  d1.attempt_id = PlacementAttemptId(777);
+  PO_CHECK(obs.ingest_decision(d1).accepted);
+  // a different decision reusing the same placement attempt id is invalid
+  auto d2 = po_scenario::memory_decision(PlacementDecisionId(502), WorkloadId(502));
+  d2.attempt_id = PlacementAttemptId(777);
+  auto r = obs.ingest_decision(d2);
+  PO_CHECK(!r.accepted && r.error.find("duplicate placement attempt") != std::string::npos);
+}
+
+PO_TEST(contradictory_hard_constraints_handled) {
+  using namespace placement_observatory;
+  std::vector<PlacementCandidate> cands;
+  auto c = po_scenario::candidate(CandidateId(1), DeviceId(1), 24ull<<30, 0, "sm_120", 0.5);
+  po_scenario::add_cost(c, CostComponentKind::MemoryHeadroom, 0.5, 1.0);
+  cands.push_back(c);
+  auto d = po_scenario::decision(PlacementDecisionId(503), WorkloadId(503), RequestId(503), cands, CandidateId(1));
+  // two mutually-exclusive hard architecture constraints
+  PlacementConstraint a; a.cls = ConstraintClass::Hard; a.kind = ConstraintKind::Architecture; a.field = "device.architecture"; a.value = Value("sm_120"); a.classification = Classification::Measured;
+  PlacementConstraint b; b.cls = ConstraintClass::Hard; b.kind = ConstraintKind::Architecture; b.field = "device.architecture"; b.value = Value("x86-64"); b.classification = Classification::Measured;
+  d.hard_constraints.push_back(a); d.hard_constraints.push_back(b);
+  // The record is valid and accepted; the deterministic ranking must reject the
+  // candidate rather than fabricating a selection.
+  Observatory obs; PO_CHECK(obs.ingest_decision(d).accepted);
+  RankingResult rk = rank_candidates(d);
+  PO_CHECK(rk.rejections.count(CandidateId(1)) > 0);
+  PO_CHECK(rk.ranked.empty());
+}
+
+
+PO_TEST(invalid_topology_identity_handled) {
+  using namespace placement_observatory;
+  Observatory obs;
+  std::vector<PlacementCandidate> cands;
+  auto c = po_scenario::candidate(CandidateId(1), DeviceId(1), 24ull<<30, 0, "sm_120", 0.5);
+  po_scenario::add_cost(c, CostComponentKind::MemoryHeadroom, 0.5, 1.0);
+  TopologyDescriptor bad; bad.type = TopologyType::Unknown; bad.from_node = NodeId(0); bad.to_node = NodeId(0);
+  c.locality.push_back({LocalityType::Unknown, "", DeviceId(0), NodeId(0), false, 0.0});
+  cands.push_back(c);
+  auto d = po_scenario::decision(PlacementDecisionId(504), WorkloadId(504), RequestId(504), cands, CandidateId(1));
+  PO_CHECK(obs.ingest_decision(d).accepted);
+  // deterministic: ranking does not crash and candidate survives with no fabricated locality benefit.
+  RankingResult rk = rank_candidates(d);
+  PO_CHECK(rk.selected == CandidateId(1));
+  auto rep = obs.replay(PlacementDecisionId(504));
+  PO_CHECK(rep.reproduced);
+}
+
+PO_TEST(policy_generation_mismatch_reported) {
+  using namespace placement_observatory;
+  Observatory obs;
+  auto d1 = po_scenario::memory_decision(PlacementDecisionId(505), WorkloadId(505));
+  d1.policy_generation = 1;
+  auto d2 = po_scenario::memory_decision(PlacementDecisionId(506), WorkloadId(505));
+  d2.policy_generation = 9;
+  obs.ingest_decision(d1); obs.ingest_decision(d2);
+  auto cmp = obs.compare(PlacementDecisionId(505), PlacementDecisionId(506));
+  bool has_pol = false;
+  for (const auto& dd : cmp.deltas) if (dd.field == "policy_generation") has_pol = true;
+  PO_CHECK(has_pol);
+}
+
+PO_TEST(stale_queue_memory_topology_evidence_rejected) {
+  Observatory obs;
+  auto make = [](PlacementObservationId id, SourceGeneration g, WorkerBootId b, const std::string& field){
+    PlacementObservation o; o.observation_id = id; o.observation_generation = g; o.source_id = SourceId(6); o.source_generation = g;
+    o.source_type = SourceType::Multiprocess; o.worker_boot = b; o.timestamp = Clock::now(); o.workload_id = WorkloadId(600);
+    o.lifecycle = LifecycleState::Collected;
+    o.fields.push_back({field, "", Value(1), Classification::Measured, Provenance{}});
+    return o;
+  };
+  PO_CHECK(obs.ingest(make(PlacementObservationId(1), 1, 11, "queue.depth")).accepted);
+  PO_CHECK(obs.ingest(make(PlacementObservationId(2), 2, 22, "memory.free_bytes")).accepted); // restart
+  // stale queue/memory/topology evidence from the superseded generation is rejected
+  auto rq = obs.ingest(make(PlacementObservationId(3), 1, 11, "queue.depth"));
+  PO_CHECK(!rq.accepted && rq.error.find("stale source generation") != std::string::npos);
+  auto rm = obs.ingest(make(PlacementObservationId(4), 1, 11, "memory.free_bytes"));
+  PO_CHECK(!rm.accepted && rm.error.find("stale source generation") != std::string::npos);
+  auto rt = obs.ingest(make(PlacementObservationId(5), 1, 11, "topology.link"));
+  PO_CHECK(!rt.accepted && rt.error.find("stale source generation") != std::string::npos);
 }
 
 PO_MAIN

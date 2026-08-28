@@ -33,7 +33,7 @@ void put_u32(std::vector<std::uint8_t>& v, std::uint32_t x) {
   v.push_back(static_cast<std::uint8_t>((x >> 16) & 0xff)); v.push_back(static_cast<std::uint8_t>((x >> 24) & 0xff));
 }
 void put_u8(std::vector<std::uint8_t>& v, std::uint8_t x) { v.push_back(x); }
-bool valid_type(std::uint8_t t) { return t <= static_cast<std::uint8_t>(MsgType::Probe); }
+bool valid_type(std::uint8_t t) { return t <= static_cast<std::uint8_t>(MsgType::Confirm); }
 constexpr std::size_t kHeaderLen = 4 + 4 + 1 + 4; // magic+version+type+payload_len = 13
 } // namespace
 
@@ -133,6 +133,13 @@ bool TcpServer::listen(std::uint16_t port) {
   listen_sock_ = static_cast<std::uintptr_t>(s);
   ok_ = true;
   return true;
+}
+bool TcpServer::wait_accept(int ms) const {
+  if (!ok_ || listen_sock_ == 0) return false;
+  fd_set rfds; FD_ZERO(&rfds); FD_SET(static_cast<SOCKET>(listen_sock_), &rfds);
+  timeval tv; tv.tv_sec = 0; tv.tv_usec = static_cast<long>(ms) * 1000;
+  const int n = select(0, &rfds, nullptr, nullptr, &tv);
+  return n > 0;
 }
 bool TcpServer::accept(TcpSocket& out) {
   if (!ok_) return false;

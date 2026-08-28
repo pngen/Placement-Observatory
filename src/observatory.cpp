@@ -207,6 +207,11 @@ IngestResult Observatory::ingest_decision(PlacementDecision d) {
   auto& I = *impl_;
   if (d.decision_id.nil()) return IngestResult{false, I.reject("invalid decision id"), I.events};
   if (I.dec_by_id.count(d.decision_id)) return IngestResult{false, I.reject("duplicate decision id"), I.events};
+  if (d.attempt_id.valid()) {
+    auto ait = I.idx_dec_attempt.find(d.attempt_id);
+    if (ait != I.idx_dec_attempt.end() && I.dec[ait->second].decision_id != d.decision_id)
+      return IngestResult{false, I.reject("duplicate placement attempt"), I.events};
+  }
   if (d.placement_generation == 0) return IngestResult{false, I.reject("zero placement generation"), I.events};
   if (d.selected_candidate.nil()) return IngestResult{false, I.reject("invalid selected candidate"), I.events};
   if (d.candidate_set.complete) {

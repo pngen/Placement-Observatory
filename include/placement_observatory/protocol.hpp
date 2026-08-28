@@ -29,6 +29,8 @@ enum class MsgType : std::uint8_t {
   Shutdown = 7,
   Ping = 8,
   Probe = 9,
+  Status = 10,
+  Confirm = 11,
 };
 
 struct Frame {
@@ -53,6 +55,8 @@ class TcpSocket {
   ~TcpSocket();
   TcpSocket(const TcpSocket&) = delete;
   TcpSocket& operator=(const TcpSocket&) = delete;
+  TcpSocket(TcpSocket&& o) noexcept : sock_(o.sock_), ok_(o.ok_) { o.sock_ = 0; o.ok_ = false; }
+  TcpSocket& operator=(TcpSocket&& o) noexcept { if (this != &o) { close(); sock_ = o.sock_; ok_ = o.ok_; o.sock_ = 0; o.ok_ = false; } return *this; }
   [[nodiscard]] bool assign_socket(std::uintptr_t raw) noexcept;
   bool send_all(const std::uint8_t* data, std::size_t n) const;
   // Receives exactly n bytes; returns false on close/error.
@@ -70,6 +74,9 @@ class TcpServer {
   ~TcpServer();
   [[nodiscard]] bool listen(std::uint16_t port);   // binds and listens on 0.0.0.0
   [[nodiscard]] bool accept(TcpSocket& out);       // blocking accept
+  // Wait up to ms for a pending connection using select(); returns true if a
+  // connection is ready. Used so a server loop can poll a shared shutdown flag.
+  [[nodiscard]] bool wait_accept(int ms) const;
   [[nodiscard]] std::uint16_t port() const;
   void close() noexcept;
  private:

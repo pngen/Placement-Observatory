@@ -69,62 +69,67 @@ json::JsonValue jnum(std::uint64_t v) { return json::JsonValue(v); }
 // ---------------------------------------------------------------------------
 // Distributed command implementations
 // ---------------------------------------------------------------------------
+#include <thread>
+#include <vector>
+#include <atomic>
+
+static void serve_handle_conn(net::TcpSocket conn, std::shared_ptr<Observatory> obs, std::atomic<bool>& running) {
+  Frame f; std::string err;
+  while (running.load() && net::recv_frame(conn, f, err)) {
+    std::string ack = "ok";
+    if (f.type == MsgType::RegisterSource) {
+      serde::BinReader r(f.payload.data(), f.payload.size());
+      obs->register_source(serde::read_source_descriptor(r)); ack = "registered";
+    } else if (f.type == MsgType::CoordinatorEpoch) {
+      serde::BinReader r(f.payload.data(), f.payload.size());
+      obs->set_coordinator_epoch(r.u64()); ack = "epoch";
+    } else if (f.type == MsgType::Observation) {
+      serde::BinReader r(f.payload.data(), f.payload.size());
+      auto res = obs->ingest(serde::read_observation(r));
+      if (!res.accepted) ack = "REJECT:" + res.error; else ack = "accepted";
+    } else if (f.type == MsgType::Decision) {
+      serde::BinReader r(f.payload.data(), f.payload.size());
+      auto res = obs->ingest_decision(serde::read_decision(r));
+      if (!res.accepted) ack = "REJECT:" + res.error; else ack = "accepted";
+    } else if (f.type == MsgType::Outcome) {
+      serde::BinReader r(f.payload.data(), f.payload.size());
+      auto res = obs->ingest_outcome(serde::read_outcome(r));
+      if (!res.accepted) ack = "REJECT:" + res.error; else ack = "accepted";
+    } else if (f.type == MsgType::Status) {
+      serde::BinReader r(f.payload.data(), f.payload.size());
+      const std::uint64_t want = r.u64();
+      serde::BinWriter w3; w3.u64(obs->coordinator_epoch());
+      w3.u64(obs->current_source_generation(SourceId(want)));
+      Frame af; af.type = MsgType::Status; af.payload = w3.bytes(); net::send_frame(conn, af);
+      continue;
+    } else if (f.type == MsgType::Shutdown) { running.store(false); break; }
+    serde::BinWriter w; w.str(ack); Frame af; af.type = MsgType::Ack; af.payload = w.bytes(); net::send_frame(conn, af);
+  }
+  conn.close();
+}
+
 static int cmd_serve(const std::vector<std::string>& a) {
   const std::uint16_t port = static_cast<std::uint16_t>(au64(arg(a, "--port", "3377")));
   const std::string trace = arg(a, "--trace");
   const std::uint64_t epoch = au64(arg(a, "--epoch", "0"));
-  Observatory obs;
-  if (!trace.empty()) { obs.recover(trace); }
-  obs.set_coordinator_epoch(epoch);
+  auto obs = std::make_shared<Observatory>();
+  if (!trace.empty()) obs->recover(trace);
+  obs->set_coordinator_epoch(epoch);
   net::TcpServer server;
   if (!server.listen(port)) { std::printf("ERR: cannot listen\n"); return 1; }
   std::printf("PORT %u\n", static_cast<unsigned>(server.port())); std::fflush(stdout);
   std::printf("EPOCH %llu\n", (unsigned long long)epoch); std::fflush(stdout);
   const std::string portfile = arg(a, "--portfile");
   if (!portfile.empty()) { std::ofstream pf(portfile); pf << static_cast<unsigned>(server.port()); pf.flush(); }
-  net::TcpSocket conn;
-  while (true) {
-    if (!server.accept(conn)) { std::printf("ERR: accept\n"); return 1; }
-    net::Frame f;
-    std::string err;
-    std::vector<net::TcpSocket> workers;
-    bool done = false;
-    while (!done && net::recv_frame(conn, f, err)) {
-      std::vector<std::uint8_t> ack_payload;
-      std::string ack = "ok";
-      if (f.type == MsgType::RegisterSource) {
-        serde::BinReader r(f.payload.data(), f.payload.size());
-        SourceDescriptor sd = serde::read_source_descriptor(r);
-        obs.register_source(sd);
-        ack = "registered " + sd.name;
-      } else if (f.type == MsgType::CoordinatorEpoch) {
-        serde::BinReader r(f.payload.data(), f.payload.size());
-        obs.set_coordinator_epoch(r.u64());
-        ack = "epoch";
-      } else if (f.type == MsgType::Observation) {
-        serde::BinReader r(f.payload.data(), f.payload.size());
-        PlacementObservation o = serde::read_observation(r);
-        auto res = obs.ingest(o);
-        if (!res.accepted) ack = "REJECT:" + res.error; else ack = "accepted";
-      } else if (f.type == MsgType::Decision) {
-        serde::BinReader r(f.payload.data(), f.payload.size());
-        PlacementDecision d = serde::read_decision(r);
-        auto res = obs.ingest_decision(d);
-        if (!res.accepted) ack = "REJECT:" + res.error; else ack = "accepted";
-      } else if (f.type == MsgType::Outcome) {
-        serde::BinReader r(f.payload.data(), f.payload.size());
-        PlacementOutcome o = serde::read_outcome(r);
-        auto res = obs.ingest_outcome(o);
-        if (!res.accepted) ack = "REJECT:" + res.error; else ack = "accepted";
-      } else if (f.type == MsgType::Shutdown) { done = true; break; }
-      else { ack = "REJECT:unhandled"; }
-      serde::BinWriter w; w.str(ack);
-      net::Frame af; af.type = MsgType::Ack; af.payload = w.bytes();
-      net::send_frame(conn, af);
-    }
-    if (!trace.empty()) obs.persist(trace);
-    conn.close();
+  std::atomic<bool> running{true};
+  std::vector<std::thread> threads;
+  while (running.load()) {
+    if (!server.wait_accept(50)) continue;   // poll running flag; never blocks forever
+    net::TcpSocket conn;
+    if (server.accept(conn)) threads.emplace_back(serve_handle_conn, std::move(conn), obs, std::ref(running));
   }
+  for (auto& th : threads) th.join();
+  if (!trace.empty()) obs->persist(trace);
   return 0;
 }
 
