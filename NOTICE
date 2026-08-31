@@ -2,10 +2,7 @@ Placement Observatory
 
 Copyright © Summon Software Labs
 
-Placement Observatory is an open-source, vendor-neutral observability runtime for
-reconstructing, explaining, replaying, and comparing AI workload placement
-decisions across heterogeneous compute, memory, topology, queue, capacity, and
-locality constraints.
+Placement Observatory is an open-source, vendor-neutral observability runtime for reconstructing, explaining, replaying, and comparing AI workload placement decisions across heterogeneous compute, memory, topology, queue, capacity, and locality constraints.
 
 This product is licensed under the Apache License, Version 2.0. See the
 LICENSE file in this distribution for the full license text.
@@ -14,8 +11,6 @@ Placement Observatory does not collect or transmit any telemetry. All telemetry 
 written to local files chosen by the operator and never leaves the machine
 running the software.
 
-Placement Observatory accepts contributions from individuals and organizations on
-the terms of the Apache License 2.0 without requiring a Contributor License
+Placement Observatory accepts contributions from individuals and organizations on the
+terms of the Apache License 2.0 without requiring a Contributor License
 Agreement (CLA). See CONTRIBUTING.md for contribution guidance.
-
-No telemetry transmission.
