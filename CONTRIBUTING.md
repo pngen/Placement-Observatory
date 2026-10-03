@@ -13,7 +13,6 @@ Agreement (CLA).
   classification must be preserved for every quantity.
 - Reconstructed candidate sets must be labelled derived and carry their source
   chain; never present reconstruction as an observed scheduler candidate set.
-- Do not add test timeouts. Tests must finish naturally.
 - Keep no telemetry transmission; telemetry is written only to operator-chosen local
   files.
 
