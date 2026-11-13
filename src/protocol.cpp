@@ -91,6 +91,12 @@ void TcpSocket::close() noexcept {
   if (ok_ && sock_ != 0) { closesocket(static_cast<SOCKET>(sock_)); }
   sock_ = 0; ok_ = false;
 }
+void TcpSocket::interrupt() const noexcept {
+  if (!ok_ || sock_ == 0) return;
+  // shutdown() fails later calls; CancelIoEx wakes a recv that is already blocked.
+  ::shutdown(static_cast<SOCKET>(sock_), SD_BOTH);
+  ::CancelIoEx(reinterpret_cast<HANDLE>(sock_), nullptr);
+}
 bool TcpSocket::send_all(const std::uint8_t* data, std::size_t n) const {
   if (!ok_) return false;
   std::size_t sent = 0;

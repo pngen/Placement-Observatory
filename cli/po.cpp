@@ -72,17 +72,30 @@ json::JsonValue jnum(std::uint64_t v) { return json::JsonValue(v); }
 #include <thread>
 #include <vector>
 #include <atomic>
+#include <mutex>
+#include <set>
 
-static void serve_handle_conn(net::TcpSocket conn, std::shared_ptr<Observatory> obs, std::atomic<bool>& running) {
+// Connections whose handlers are still running; woken at shutdown.
+struct OpenConnections {
+  std::mutex m;
+  std::set<net::TcpSocket*> live;
+};
+
+static void serve_handle_conn(net::TcpSocket conn, std::shared_ptr<Observatory> obs, std::atomic<bool>& running, OpenConnections& open) {
+  { std::lock_guard<std::mutex> l(open.m); open.live.insert(&conn); }
   Frame f; std::string err;
   while (running.load() && net::recv_frame(conn, f, err)) {
     std::string ack = "ok";
+    try {
     if (f.type == MsgType::RegisterSource) {
       serde::BinReader r(f.payload.data(), f.payload.size());
       obs->register_source(serde::read_source_descriptor(r)); ack = "registered";
     } else if (f.type == MsgType::CoordinatorEpoch) {
       serde::BinReader r(f.payload.data(), f.payload.size());
-      obs->set_coordinator_epoch(r.u64()); ack = "epoch";
+      const std::uint64_t e = r.u64();
+      obs->set_coordinator_epoch(e);
+      // The epoch only moves forward: an older epoch is refused, not applied.
+      ack = obs->coordinator_epoch() > e ? "REJECT:stale coordinator epoch" : "epoch";
     } else if (f.type == MsgType::Observation) {
       serde::BinReader r(f.payload.data(), f.payload.size());
       auto res = obs->ingest(serde::read_observation(r));
@@ -103,8 +116,13 @@ static void serve_handle_conn(net::TcpSocket conn, std::shared_ptr<Observatory> 
       Frame af; af.type = MsgType::Status; af.payload = w3.bytes(); net::send_frame(conn, af);
       continue;
     } else if (f.type == MsgType::Shutdown) { running.store(false); break; }
+    } catch (const std::exception& e) {
+      // A malformed payload is rejected; it never terminates the coordinator.
+      ack = std::string("REJECT:malformed message: ") + e.what();
+    }
     serde::BinWriter w; w.str(ack); Frame af; af.type = MsgType::Ack; af.payload = w.bytes(); net::send_frame(conn, af);
   }
+  { std::lock_guard<std::mutex> l(open.m); open.live.erase(&conn); }
   conn.close();
 }
 
@@ -122,12 +140,16 @@ static int cmd_serve(const std::vector<std::string>& a) {
   const std::string portfile = arg(a, "--portfile");
   if (!portfile.empty()) { std::ofstream pf(portfile); pf << static_cast<unsigned>(server.port()); pf.flush(); }
   std::atomic<bool> running{true};
+  OpenConnections open;
   std::vector<std::thread> threads;
   while (running.load()) {
     if (!server.wait_accept(50)) continue;   // poll running flag; never blocks forever
     net::TcpSocket conn;
-    if (server.accept(conn)) threads.emplace_back(serve_handle_conn, std::move(conn), obs, std::ref(running));
+    if (server.accept(conn)) threads.emplace_back(serve_handle_conn, std::move(conn), obs, std::ref(running), std::ref(open));
   }
+  // Wake handlers still blocked on open connections; an idle peer otherwise
+  // kept shutdown waiting forever and the trace below was never persisted.
+  { std::lock_guard<std::mutex> l(open.m); for (auto* s : open.live) s->interrupt(); }
   for (auto& th : threads) th.join();
   if (!trace.empty()) obs->persist(trace);
   return 0;

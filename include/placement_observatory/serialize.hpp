@@ -153,7 +153,9 @@ template <typename T, typename W> void write_vec(BinWriter& w, const std::vector
 }
 template <typename T, typename R> std::vector<T> read_vec(BinReader& r, R fn) {
   const std::uint32_t n = r.u32();
-  std::vector<T> out; out.reserve(n);
+  // Every element takes at least one byte: never reserve an untrusted count
+  // beyond the bytes left (a larger count is truncated input and throws below).
+  std::vector<T> out; out.reserve(n < r.remaining() ? n : r.remaining());
   for (std::uint32_t i = 0; i < n; ++i) out.push_back(fn(r));
   return out;
 }

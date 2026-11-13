@@ -62,6 +62,10 @@ class TcpSocket {
   // Receives exactly n bytes; returns false on close/error.
   bool recv_exact(std::uint8_t* data, std::size_t n) const;
   void close() noexcept;
+  // Callable from another thread while the owner is blocked in recv/send:
+  // wakes the blocked call and fails later ones. The socket stays owned (and
+  // is closed) by its owner.
+  void interrupt() const noexcept;
   [[nodiscard]] bool valid() const noexcept;
  private:
   std::uintptr_t sock_ = 0;   // SOCKET type stored as uintptr_t

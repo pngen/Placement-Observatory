@@ -1,8 +1,10 @@
 #include "placement_observatory/observatory.hpp"
 #include "placement_observatory/serialize.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <mutex>
@@ -34,9 +36,12 @@ std::vector<std::uint8_t> read_file(const std::string& p) {
   while (f) { f.read(buf, sizeof(buf)); const auto n = f.gcount(); if (n > 0) b.insert(b.end(), buf, buf + n); }
   return b;
 }
-void write_file(const std::string& p, const std::vector<std::uint8_t>& b) {
+bool write_file(const std::string& p, const std::vector<std::uint8_t>& b) {
   std::ofstream f(p, std::ios::binary | std::ios::trunc);
+  if (!f) return false;
   f.write(reinterpret_cast<const char*>(b.data()), static_cast<std::streamsize>(b.size()));
+  f.close();
+  return !f.fail();
 }
 } // namespace
 
@@ -73,7 +78,7 @@ struct Observatory::Impl {
 
   std::uint64_t rejected = 0;
   std::uint64_t superseded = 0;
-  std::uint64_t snapshot_count = 0;
+  std::atomic<std::uint64_t> snapshot_count{0};   // incremented by concurrent snapshot() readers
   std::uint64_t events = 0;
 
   void index_obs(const PlacementObservation& o, std::size_t i) {
@@ -120,6 +125,10 @@ void Observatory::register_source(SourceDescriptor d) {
     // observation of the new generation.
     impl_->src_gen[d.source_id] = d.generation;
     impl_->src_boot[d.source_id] = 0;
+  } else if (d.generation < it->second) {
+    // A superseded generation never replaces the current registration (it
+    // would also be persisted and re-adopted as the authority on recovery).
+    return;
   }
   impl_->sources[d.source_id] = std::move(d);
   impl_->src_last_seen[d.source_id] = Clock::now();
@@ -149,7 +158,9 @@ std::uint64_t Observatory::current_source_generation(SourceId id) const {
 }
 void Observatory::set_coordinator_epoch(std::uint64_t epoch) {
   std::unique_lock lock(impl_->mtx);
-  impl_->coordinator = epoch;
+  // The coordinator epoch is a fence: it only moves forward, so evidence from a
+  // superseded epoch can never be accepted again.
+  if (epoch > impl_->coordinator) impl_->coordinator = epoch;
 }
 std::uint64_t Observatory::coordinator_epoch() const {
   std::shared_lock lock(impl_->mtx);
@@ -176,13 +187,6 @@ IngestResult Observatory::ingest(PlacementObservation o) {
     return IngestResult{false, I.reject("stale source generation"), I.events};
   if (I.cfg.enforce_stale_worker_boot && o.source_generation == cur && have_boot && o.worker_boot != itb->second)
     return IngestResult{false, I.reject("stale worker boot"), I.events};
-  if (o.source_generation > cur) {
-    I.src_gen[o.source_id] = o.source_generation;
-    I.src_boot[o.source_id] = o.worker_boot;
-    if (cur > 0) ++I.superseded;
-  } else if (!have_boot) {
-    I.src_boot[o.source_id] = o.worker_boot;  // adopt the first trusted boot
-  }
   if (I.cfg.enforce_stale_coordinator_epoch && I.coordinator != 0 && o.coordinator_epoch != 0 && o.coordinator_epoch < I.coordinator)
     return IngestResult{false, I.reject("stale coordinator epoch"), I.events};
   // validate field values
@@ -192,6 +196,15 @@ IngestResult Observatory::ingest(PlacementObservation o) {
     if ((m.normalized_field == "memory.free_bytes" || m.normalized_field == "memory.used_bytes" || m.normalized_field == "memory.total_bytes")
         && m.value.kind() == ValueKind::UInt && m.value.as_uint() > 0xFFFFFFFFFFFFFFFFull / 2)
       return IngestResult{false, I.reject("impossible memory value"), I.events};
+  }
+  // Authority changes only once the observation is accepted: rejected evidence
+  // never advances the source generation or adopts its worker boot.
+  if (o.source_generation > cur) {
+    I.src_gen[o.source_id] = o.source_generation;
+    I.src_boot[o.source_id] = o.worker_boot;
+    if (cur > 0) ++I.superseded;
+  } else if (!have_boot) {
+    I.src_boot[o.source_id] = o.worker_boot;  // adopt the first trusted boot
   }
   const std::size_t idx = I.obs.size();
   o.lifecycle = LifecycleState::Correlated;
@@ -246,6 +259,8 @@ IngestResult Observatory::ingest_outcome(PlacementOutcome o) {
   if (o.attempt_id.valid() && d.attempt_id.valid() && o.attempt_id != d.attempt_id)
     return IngestResult{false, I.reject("outcome wrong generation"), I.events};
   if (o.disposition == OutcomeDisposition::Unknown) return IngestResult{false, I.reject("unknown outcome disposition"), I.events};
+  if (I.cfg.enforce_stale_coordinator_epoch && I.coordinator != 0 && o.provenance.coordinator_epoch != 0 && o.provenance.coordinator_epoch < I.coordinator)
+    return IngestResult{false, I.reject("stale coordinator epoch"), I.events};
   I.outcomes[o.decision_id] = o;
   ++I.events;
   return IngestResult{true, "", I.events};
@@ -415,11 +430,13 @@ void Observatory::persist(const std::string& path) const {
   for (const auto& o : obs_c) { serde::BinWriter w; serde::write_observation(w, o); append(serde::RecordKind::Observation, w.bytes()); }
   for (const auto& d : dec_c) { serde::BinWriter w; serde::write_decision(w, d); append(serde::RecordKind::Decision, w.bytes()); }
   for (const auto& [id, o] : out_c) { serde::BinWriter w; serde::write_outcome(w, o); append(serde::RecordKind::Outcome, w.bytes()); }
-  // Atomic replacement: write temp then rename.
+  // Atomic replacement: write temp then rename over the previous trace, which
+  // stays intact unless the new trace was written completely.
   const std::string tmp = path + ".tmp";
-  write_file(tmp, bytes);
-  std::remove(path.c_str());
-  std::rename(tmp.c_str(), path.c_str());
+  if (!write_file(tmp, bytes)) { std::remove(tmp.c_str()); return; }
+  std::error_code ec;
+  std::filesystem::rename(tmp, path, ec);   // replaces an existing trace in one step
+  if (ec) std::remove(tmp.c_str());
 }
 
 std::size_t Observatory::recover(const std::string& path) {
@@ -442,7 +459,7 @@ std::size_t Observatory::recover(const std::string& path) {
     off += consumed;
     try {
       serde::BinReader r(body.data(), body.size());
-      if (kind == serde::RecordKind::Epoch) { I.coordinator = r.u64(); }
+      if (kind == serde::RecordKind::Epoch) { I.coordinator = (std::max)(I.coordinator, r.u64()); }
       else if (kind == serde::RecordKind::SourceDescriptor) {
         auto d = serde::read_source_descriptor(r);
         I.sources[d.source_id] = d;
@@ -453,7 +470,14 @@ std::size_t Observatory::recover(const std::string& path) {
         if (I.obs_by_id.count(o.observation_id)) continue;
         const std::size_t idx = I.obs.size();
         I.obs.push_back(o); I.obs_by_id[o.observation_id] = idx; I.index_obs(o, idx);
-        if (o.source_generation > I.src_gen[o.source_id]) { I.src_gen[o.source_id] = o.source_generation; I.src_boot[o.source_id] = o.worker_boot; }
+        SourceGeneration& g = I.src_gen[o.source_id];
+        if (o.source_generation > g) { g = o.source_generation; I.src_boot[o.source_id] = o.worker_boot; }
+        else if (o.source_generation == g) {
+          // The current generation may already be known from its descriptor
+          // record: re-establish its trusted boot from its evidence.
+          WorkerBootId& b = I.src_boot[o.source_id];
+          if (b == 0) b = o.worker_boot;
+        }
       }
       else if (kind == serde::RecordKind::Decision) {
         auto d = serde::read_decision(r);

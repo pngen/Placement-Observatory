@@ -17,3 +17,10 @@ po_add_test(randomized.test randomized.test.cpp)
 po_add_test(persistence.test persistence.test.cpp)
 po_add_test(multiprocess.test multiprocess.test.cpp)
 po_add_test(authority.test authority.test.cpp)
+
+# Regression scenarios (library, and the `po serve` coordinator process).
+po_add_test(regression.test regression.test.cpp)
+po_add_test(coordinator_regression.test coordinator_regression.test.cpp)
+foreach(t regression.test coordinator_regression.test)
+  target_compile_definitions(${t} PRIVATE PO_TEST_SCRATCH="${CMAKE_CURRENT_BINARY_DIR}/${t}_scratch")
+endforeach()
